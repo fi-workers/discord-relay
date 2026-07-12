@@ -127,6 +127,17 @@ test('github workflow_run success is filtered', () => withFetch(async (calls) =>
   assert.equal(calls.length, 0);
 }));
 
+test('sentry issue resolved is filtered (no post)', () => withFetch(async (calls) => {
+  await post('/api/sentry', { action: 'resolved', data: { issue: { title: 'x', web_url: 'https://s' } } });
+  assert.equal(calls.length, 0);
+}));
+
+test('sentry issue created posts', () => withFetch(async (calls) => {
+  await post('/api/sentry', { action: 'created', data: { issue: { title: 'NewError', web_url: 'https://s' } } });
+  assert.equal(calls.length, 1);
+  assert.match(calls[0].embed.title, /NewError/);
+}));
+
 test('signature required but missing -> 401', () => withFetch(async (calls) => {
   const r = await handleRequest(new Request('http://x/api/vercel', { method: 'POST', body: '{}' }),
     { ...ENV, VERCEL_SECRET: 'sek' });

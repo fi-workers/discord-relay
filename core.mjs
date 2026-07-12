@@ -117,7 +117,11 @@ const AUTHOR = {
 };
 
 // ── Sentry payload -> Discord embed ──
+// Org-wide Internal Integration fires on the whole issue lifecycle; only surface
+// new/triggered alerts and skip lifecycle churn (resolved/assigned/ignored/…).
+const SENTRY_SKIP = new Set(['resolved', 'assigned', 'unassigned', 'ignored', 'archived', 'unresolved']);
 function sentryToEmbed(body) {
+  if (SENTRY_SKIP.has(body?.action)) return null;
   const d = body?.data ?? {};
   const ev = d.event ?? d.issue ?? d.error ?? body?.event ?? {};
   const title = ev.title || ev.metadata?.value || ev.message || body?.message || 'Sentry alert';
