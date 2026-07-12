@@ -26,7 +26,7 @@ export async function handleRequest(request, env) {
           request.headers.get('sentry-hook-signature'))))
         return new Response('bad signature', { status: 401 });
       const embed = sentryToEmbed(JSON.parse(raw));
-      if (embed) await postDiscord(env.DISCORD_SENTRY_WEBHOOK, embed);
+      if (embed) await sendToDiscord(env, 'sentry', embed);
       return new Response('ok');
     }
 
@@ -35,7 +35,7 @@ export async function handleRequest(request, env) {
           request.headers.get('x-vercel-signature'))))
         return new Response('bad signature', { status: 401 });
       const embed = vercelToEmbed(JSON.parse(raw));
-      if (embed) await postDiscord(env.DISCORD_DEPLOY_WEBHOOK, embed);
+      if (embed) await sendToDiscord(env, 'deploy', embed);
       return new Response('ok');
     }
 
@@ -63,13 +63,26 @@ async function verify(hash, secret, bodyBytes, sigHeader) {
   return diff === 0; // constant-time compare
 }
 
-async function postDiscord(webhook, embed) {
-  if (!webhook) throw new Error('missing Discord webhook URL (check env)');
-  const send = () => fetch(webhook, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ embeds: [embed] }),
-  });
+// Pick destination by kind. Two modes, chosen by which env vars are set:
+//   Bot mode     (DISCORD_BOT_TOKEN set): REST call to the channel — stateless
+//                HTTP, no Gateway/session needed, fine on serverless.
+//   Webhook mode (default): POST straight to the channel webhook URL.
+async function sendToDiscord(env, kind, embed) {
+  const body = JSON.stringify({ embeds: [embed] });
+  if (env.DISCORD_BOT_TOKEN) {
+    const channelId = kind === 'sentry' ? env.DISCORD_SENTRY_CHANNEL_ID : env.DISCORD_DEPLOY_CHANNEL_ID;
+    if (!channelId) throw new Error(`missing Discord channel id for "${kind}" (check env)`);
+    return post(`https://discord.com/api/v10/channels/${channelId}/messages`, body, `Bot ${env.DISCORD_BOT_TOKEN}`);
+  }
+  const webhook = kind === 'sentry' ? env.DISCORD_SENTRY_WEBHOOK : env.DISCORD_DEPLOY_WEBHOOK;
+  return post(webhook, body);
+}
+
+async function post(url, body, auth) {
+  if (!url) throw new Error('missing Discord destination (check env)');
+  const headers = { 'content-type': 'application/json' };
+  if (auth) headers.authorization = auth;
+  const send = () => fetch(url, { method: 'POST', headers, body });
   let res = await send();
   if (res.status === 429) { // rate limited — honor Retry-After once, then retry
     const wait = Math.min(Number(res.headers.get('retry-after')) || 1, 5);

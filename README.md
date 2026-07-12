@@ -24,14 +24,36 @@ On Vercel the paths are `/api/sentry` and `/api/vercel`.
 
 ## Environment variables
 
-| Name                     | Required | Purpose                               |
-| ------------------------ | -------- | ------------------------------------- |
-| `DISCORD_SENTRY_WEBHOOK` | yes      | Discord webhook URL for the error channel   |
-| `DISCORD_DEPLOY_WEBHOOK` | yes      | Discord webhook URL for the deploy channel  |
-| `SENTRY_SECRET`          | no       | Sentry Client Secret → HMAC-SHA256 verify   |
-| `VERCEL_SECRET`          | no       | Vercel webhook secret → HMAC-SHA1 verify    |
+Pick **one delivery mode**:
 
-Get a Discord webhook: **Channel → Edit → Integrations → Webhooks → New Webhook → Copy URL.**
+**Mode A — Webhook** (simplest, one URL per channel):
+
+| Name                     | Purpose                                    |
+| ------------------------ | ------------------------------------------ |
+| `DISCORD_SENTRY_WEBHOOK` | Discord webhook URL for the error channel  |
+| `DISCORD_DEPLOY_WEBHOOK` | Discord webhook URL for the deploy channel |
+
+Get a webhook: **Channel → Edit → Integrations → Webhooks → New Webhook → Copy URL.**
+
+**Mode B — Bot** (one token, many channels). Sending is a stateless REST call
+(`POST /channels/{id}/messages`), so no Gateway/session is needed — it runs fine
+on serverless. If `DISCORD_BOT_TOKEN` is set, it takes precedence over webhooks.
+
+| Name                        | Purpose                                       |
+| --------------------------- | --------------------------------------------- |
+| `DISCORD_BOT_TOKEN`         | Bot token (needs "Send Messages" in the channels) |
+| `DISCORD_SENTRY_CHANNEL_ID` | Channel ID for errors                         |
+| `DISCORD_DEPLOY_CHANNEL_ID` | Channel ID for deploys                        |
+
+Get a channel ID: enable **Settings → Advanced → Developer Mode**, then
+right-click the channel → **Copy Channel ID**.
+
+**Optional (both modes)** — signature verification:
+
+| Name            | Purpose                                   |
+| --------------- | ----------------------------------------- |
+| `SENTRY_SECRET` | Sentry Client Secret → HMAC-SHA256 verify |
+| `VERCEL_SECRET` | Vercel webhook secret → HMAC-SHA1 verify  |
 
 ## Deploy
 
