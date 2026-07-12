@@ -109,6 +109,13 @@ async function post(url, body, auth) {
   if (!res.ok) throw new Error(`discord ${res.status} ${await res.text()}`);
 }
 
+// Shared embed chrome — consistent branding so each source is recognizable at a glance.
+const nowIso = () => new Date().toISOString();
+const AUTHOR = {
+  sentry: { name: 'Sentry', icon_url: 'https://www.google.com/s2/favicons?domain=sentry.io&sz=64' },
+  vercel: { name: 'Vercel', icon_url: 'https://www.google.com/s2/favicons?domain=vercel.com&sz=64' },
+};
+
 // ── Sentry payload -> Discord embed ──
 function sentryToEmbed(body) {
   const d = body?.data ?? {};
@@ -117,15 +124,20 @@ function sentryToEmbed(body) {
   const level = String(ev.level || 'error').toLowerCase();
   const link = ev.web_url || ev.issue_url || ev.url || d.issue?.web_url || d.web_url || body?.url;
   const color = { fatal: 0xc24036, error: 0xc24036, warning: 0xe0a03a, info: 0x5a6379 }[level] ?? 0xc24036;
+  const emoji = { fatal: '🔴', error: '🔴', warning: '🟠', info: '🔵' }[level] ?? '🔴';
+  const project = ev.project || d.project || body?.project_name;
   return {
-    title: `🔴 ${title}`.slice(0, 256),
+    author: AUTHOR.sentry,
+    title: `${emoji} ${title}`.slice(0, 256),
     url: link,
     color,
     fields: [
       { name: 'Level', value: level, inline: true },
-      { name: 'Env', value: ev.environment || 'unknown', inline: true },
-      ev.culprit ? { name: 'Culprit', value: String(ev.culprit).slice(0, 1024) } : null,
+      { name: 'Environment', value: ev.environment || 'unknown', inline: true },
+      ev.culprit ? { name: 'Culprit', value: '`' + String(ev.culprit).slice(0, 1000) + '`' } : null,
     ].filter(Boolean),
+    footer: { text: project ? `Sentry · ${project}` : 'Sentry' },
+    timestamp: nowIso(),
   };
 }
 
@@ -150,16 +162,20 @@ function vercelToEmbed(body) {
     'deployment.created': ['🔵', 'Started', 0x5865f2],
   };
   const [emoji, label, color] = map[type] || ['📦', type || 'Deployment', 0x5a6379];
+  const branch = dep.meta?.githubCommitRef || p.meta?.githubCommitRef;
 
   return {
+    author: AUTHOR.vercel,
     title: `${emoji} ${label} · ${name}`.slice(0, 256),
     url: link,
     color,
-    description: commit ? '`' + String(commit).slice(0, 300) + '`' : undefined,
+    description: commit ? '> ' + String(commit).slice(0, 300).replace(/\n/g, ' ') : undefined,
     fields: [
-      { name: 'Target', value: target, inline: true },
-      { name: 'Event', value: String(type).replace('deployment.', '') || '-', inline: true },
-    ],
+      { name: 'Environment', value: target, inline: true },
+      branch ? { name: 'Branch', value: `\`${branch}\``, inline: true } : null,
+    ].filter(Boolean),
+    footer: { text: `Vercel · ${name}` },
+    timestamp: nowIso(),
   };
 }
 
@@ -168,7 +184,13 @@ function vercelToEmbed(body) {
 // `ping` and unknown events fall through to null and just get a 200.
 function githubToEmbed(event, body) {
   const repo = body?.repository?.full_name || 'repo';
-  const footer = body?.sender?.login ? { footer: { text: body.sender.login } } : {};
+  const s = body?.sender || {};
+  // Author uses the actor's real GitHub avatar (reliable image URL) for instant recognition.
+  const deco = {
+    author: s.login ? { name: s.login, icon_url: s.avatar_url, url: s.html_url } : undefined,
+    footer: { text: `GitHub · ${repo}` },
+    timestamp: nowIso(),
+  };
 
   if (event === 'push') {
     const branch = String(body.ref || '').replace('refs/heads/', '');
@@ -178,7 +200,7 @@ function githubToEmbed(event, body) {
       (c) => `\`${String(c.id || '').slice(0, 7)}\` ${String(c.message || '').split('\n')[0].slice(0, 72)}`);
     return {
       title: `📤 ${commits.length} commit${commits.length > 1 ? 's' : ''} · ${repo}:${branch}`.slice(0, 256),
-      url: body.compare, color: 0x5865f2, description: lines.join('\n'), ...footer,
+      url: body.compare, color: 0x5865f2, description: lines.join('\n'), ...deco,
     };
   }
 
@@ -193,7 +215,7 @@ function githubToEmbed(event, body) {
     return {
       title: `${emoji} PR ${label}: ${pr.title || ''} · ${repo}`.slice(0, 256),
       url: pr.html_url, color,
-      fields: [{ name: 'PR', value: `#${pr.number ?? '-'}`, inline: true }], ...footer,
+      fields: [{ name: 'PR', value: `#${pr.number ?? '-'}`, inline: true }], ...deco,
     };
   }
 
@@ -203,7 +225,7 @@ function githubToEmbed(event, body) {
     const is = body.issue || {};
     return {
       title: `🐛 Issue ${action}: ${is.title || ''} · ${repo}`.slice(0, 256),
-      url: is.html_url, color: action === 'closed' ? 0x5a6379 : 0xe0a03a, ...footer,
+      url: is.html_url, color: action === 'closed' ? 0x5a6379 : 0xe0a03a, ...deco,
     };
   }
 
@@ -212,7 +234,7 @@ function githubToEmbed(event, body) {
     const rel = body.release || {};
     return {
       title: `🏷️ Release ${rel.tag_name || ''} · ${repo}`.slice(0, 256),
-      url: rel.html_url, color: 0x3ba55d, ...footer,
+      url: rel.html_url, color: 0x3ba55d, ...deco,
     };
   }
 
@@ -222,7 +244,7 @@ function githubToEmbed(event, body) {
     return {
       title: `🔴 CI failed: ${wr.name || ''} · ${repo}`.slice(0, 256),
       url: wr.html_url, color: 0xc24036,
-      fields: [{ name: 'Branch', value: wr.head_branch || '-', inline: true }], ...footer,
+      fields: [{ name: 'Branch', value: wr.head_branch || '-', inline: true }], ...deco,
     };
   }
 
