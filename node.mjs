@@ -8,9 +8,15 @@ import { createServer } from 'node:http';
 createServer(async (req, res) => {
   const chunks = [];
   for await (const c of req) chunks.push(c);
+  // req.headers may hold arrays for repeated headers — the Headers ctor rejects those.
+  const headers = new Headers();
+  for (const [k, v] of Object.entries(req.headers)) {
+    if (Array.isArray(v)) v.forEach((vv) => headers.append(k, vv));
+    else if (v != null) headers.set(k, v);
+  }
   const request = new Request('http://localhost' + req.url, {
     method: req.method,
-    headers: req.headers,
+    headers,
     body: /^(GET|HEAD)$/.test(req.method) ? undefined : Buffer.concat(chunks),
   });
   const out = await handleRequest(request, process.env);

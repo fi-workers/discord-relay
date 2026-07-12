@@ -16,11 +16,13 @@ export async function handleRequest(request, env) {
   if (request.method !== 'POST') return new Response('method not allowed', { status: 405 });
 
   const source = url.pathname.split('/').filter(Boolean).pop(); // "sentry" | "vercel"
-  const raw = await request.text(); // read once — needed for signature verification
+  // Read raw bytes once: sign over the exact bytes the sender signed, decode for JSON.
+  const rawBytes = new Uint8Array(await request.arrayBuffer());
+  const raw = new TextDecoder().decode(rawBytes);
 
   try {
     if (source === 'sentry') {
-      if (env.SENTRY_SECRET && !(await verify('SHA-256', env.SENTRY_SECRET, raw,
+      if (env.SENTRY_SECRET && !(await verify('SHA-256', env.SENTRY_SECRET, rawBytes,
           request.headers.get('sentry-hook-signature'))))
         return new Response('bad signature', { status: 401 });
       const embed = sentryToEmbed(JSON.parse(raw));
@@ -29,7 +31,7 @@ export async function handleRequest(request, env) {
     }
 
     if (source === 'vercel') {
-      if (env.VERCEL_SECRET && !(await verify('SHA-1', env.VERCEL_SECRET, raw,
+      if (env.VERCEL_SECRET && !(await verify('SHA-1', env.VERCEL_SECRET, rawBytes,
           request.headers.get('x-vercel-signature'))))
         return new Response('bad signature', { status: 401 });
       const embed = vercelToEmbed(JSON.parse(raw));
@@ -44,15 +46,17 @@ export async function handleRequest(request, env) {
 }
 
 // ── HMAC signature verification (Web Crypto) ──
-async function verify(hash, secret, body, sigHeader) {
+// `bodyBytes` are the exact received bytes; sign over those, not a re-encoded string.
+async function verify(hash, secret, bodyBytes, sigHeader) {
   if (!sigHeader) return false;
   const key = await crypto.subtle.importKey(
     'raw', new TextEncoder().encode(secret),
     { name: 'HMAC', hash }, false, ['sign'],
   );
-  const mac = await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(body));
+  const mac = await crypto.subtle.sign('HMAC', key, bodyBytes);
   const hex = [...new Uint8Array(mac)].map((b) => b.toString(16).padStart(2, '0')).join('');
-  const got = sigHeader.trim();
+  // Providers send bare lowercase hex; normalize case and strip an optional "algo=" prefix.
+  const got = sigHeader.trim().toLowerCase().replace(/^[a-z0-9]+=/, '');
   if (hex.length !== got.length) return false;
   let diff = 0;
   for (let i = 0; i < hex.length; i++) diff |= hex.charCodeAt(i) ^ got.charCodeAt(i);
@@ -61,21 +65,27 @@ async function verify(hash, secret, body, sigHeader) {
 
 async function postDiscord(webhook, embed) {
   if (!webhook) throw new Error('missing Discord webhook URL (check env)');
-  const res = await fetch(webhook, {
+  const send = () => fetch(webhook, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ embeds: [embed] }),
   });
+  let res = await send();
+  if (res.status === 429) { // rate limited — honor Retry-After once, then retry
+    const wait = Math.min(Number(res.headers.get('retry-after')) || 1, 5);
+    await new Promise((r) => setTimeout(r, wait * 1000));
+    res = await send();
+  }
   if (!res.ok) throw new Error(`discord ${res.status} ${await res.text()}`);
 }
 
 // ── Sentry payload -> Discord embed ──
 function sentryToEmbed(body) {
   const d = body?.data ?? {};
-  const ev = d.event ?? d.issue ?? body?.event ?? {};
-  const title = ev.title || ev.metadata?.value || body?.message || 'Sentry alert';
+  const ev = d.event ?? d.issue ?? d.error ?? body?.event ?? {};
+  const title = ev.title || ev.metadata?.value || ev.message || body?.message || 'Sentry alert';
   const level = String(ev.level || 'error').toLowerCase();
-  const link = ev.web_url || ev.issue_url || d.issue?.web_url || body?.url;
+  const link = ev.web_url || ev.issue_url || ev.url || d.issue?.web_url || d.web_url || body?.url;
   const color = { fatal: 0xc24036, error: 0xc24036, warning: 0xe0a03a, info: 0x5a6379 }[level] ?? 0xc24036;
   return {
     title: `🔴 ${title}`.slice(0, 256),

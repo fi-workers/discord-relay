@@ -6,6 +6,7 @@
   "license": "MIT",
   "scripts": {
     "start": "node node.mjs",
+    "test": "node --test",
     "deploy:cf": "wrangler deploy"
   }
 }
