@@ -1,0 +1,11 @@
+{
+  "name": "discord-relay",
+  "version": "1.0.0",
+  "description": "Runtime-agnostic webhook relay: Sentry & Vercel alerts -> Discord",
+  "type": "module",
+  "license": "MIT",
+  "scripts": {
+    "start": "node node.mjs",
+    "deploy:cf": "wrangler deploy"
+  }
+}

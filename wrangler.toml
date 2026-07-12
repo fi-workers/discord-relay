@@ -1,0 +1,6 @@
+name = "discord-relay"
+main = "src/worker.mjs"
+compatibility_date = "2024-11-01"
+
+# Secrets (set with: wrangler secret put <NAME>)
+#   DISCORD_SENTRY_WEBHOOK, DISCORD_DEPLOY_WEBHOOK, SENTRY_SECRET, VERCEL_SECRET
