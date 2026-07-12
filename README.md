@@ -14,13 +14,19 @@ the repo is safe to keep public while each deployment stays private.
 
 ## Routes
 
-| Method | Path       | Source                                   | Posts to                 |
+| Method | Path       | Source                                   | Posts to (webhook mode)  |
 | ------ | ---------- | ---------------------------------------- | ------------------------ |
 | POST   | `/sentry`  | Sentry Internal Integration webhook      | `DISCORD_SENTRY_WEBHOOK` |
 | POST   | `/vercel`  | Vercel team Webhook                      | `DISCORD_DEPLOY_WEBHOOK` |
+| POST   | `/github`  | GitHub repo/org webhook                  | `DISCORD_GITHUB_WEBHOOK` |
 | GET    | `/`        | health check                             | —                        |
 
-On Vercel the paths are `/api/sentry` and `/api/vercel`.
+On Vercel the paths are `/api/sentry`, `/api/vercel`, `/api/github`.
+
+GitHub events surfaced (rest are ignored to cut noise): `push`, `pull_request`
+(opened/reopened/closed/merged), `issues` (opened/closed/reopened), `release`
+(published), `workflow_run` (failures only). Set the webhook **Content type** to
+`application/json`.
 
 ## Environment variables
 

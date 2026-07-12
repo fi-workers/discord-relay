@@ -39,6 +39,16 @@ export async function handleRequest(request, env) {
       return new Response('ok');
     }
 
+    if (source === 'github') {
+      if (env.GITHUB_SECRET && !(await verify('SHA-256', env.GITHUB_SECRET, rawBytes,
+          request.headers.get('x-hub-signature-256'))))
+        return new Response('bad signature', { status: 401 });
+      const event = request.headers.get('x-github-event') || '';
+      const embed = githubToEmbed(event, JSON.parse(raw));
+      if (embed) await sendToDiscord(env, 'github', embed);
+      return new Response('ok');
+    }
+
     return new Response('not found', { status: 404 });
   } catch (e) {
     return new Response('error: ' + (e?.message ?? e), { status: 500 });
@@ -63,19 +73,26 @@ async function verify(hash, secret, bodyBytes, sigHeader) {
   return diff === 0; // constant-time compare
 }
 
+// Per-kind destination env var names.
+const DEST = {
+  sentry: { webhook: 'DISCORD_SENTRY_WEBHOOK', channel: 'DISCORD_SENTRY_CHANNEL_ID' },
+  deploy: { webhook: 'DISCORD_DEPLOY_WEBHOOK', channel: 'DISCORD_DEPLOY_CHANNEL_ID' },
+  github: { webhook: 'DISCORD_GITHUB_WEBHOOK', channel: 'DISCORD_GITHUB_CHANNEL_ID' },
+};
+
 // Pick destination by kind. Two modes, chosen by which env vars are set:
 //   Bot mode     (DISCORD_BOT_TOKEN set): REST call to the channel — stateless
 //                HTTP, no Gateway/session needed, fine on serverless.
 //   Webhook mode (default): POST straight to the channel webhook URL.
 async function sendToDiscord(env, kind, embed) {
+  const keys = DEST[kind];
   const body = JSON.stringify({ embeds: [embed] });
   if (env.DISCORD_BOT_TOKEN) {
-    const channelId = kind === 'sentry' ? env.DISCORD_SENTRY_CHANNEL_ID : env.DISCORD_DEPLOY_CHANNEL_ID;
+    const channelId = env[keys.channel];
     if (!channelId) throw new Error(`missing Discord channel id for "${kind}" (check env)`);
     return post(`https://discord.com/api/v10/channels/${channelId}/messages`, body, `Bot ${env.DISCORD_BOT_TOKEN}`);
   }
-  const webhook = kind === 'sentry' ? env.DISCORD_SENTRY_WEBHOOK : env.DISCORD_DEPLOY_WEBHOOK;
-  return post(webhook, body);
+  return post(env[keys.webhook], body);
 }
 
 async function post(url, body, auth) {
@@ -144,4 +161,70 @@ function vercelToEmbed(body) {
       { name: 'Event', value: String(type).replace('deployment.', '') || '-', inline: true },
     ],
   };
+}
+
+// ── GitHub webhook -> Discord embed. `event` is the X-GitHub-Event header. ──
+// Returns null for events/actions we intentionally skip (keeps noise down);
+// `ping` and unknown events fall through to null and just get a 200.
+function githubToEmbed(event, body) {
+  const repo = body?.repository?.full_name || 'repo';
+  const footer = body?.sender?.login ? { footer: { text: body.sender.login } } : {};
+
+  if (event === 'push') {
+    const branch = String(body.ref || '').replace('refs/heads/', '');
+    const commits = body.commits || [];
+    if (!commits.length) return null; // branch/tag delete or no-commit push
+    const lines = commits.slice(0, 5).map(
+      (c) => `\`${String(c.id || '').slice(0, 7)}\` ${String(c.message || '').split('\n')[0].slice(0, 72)}`);
+    return {
+      title: `📤 ${commits.length} commit${commits.length > 1 ? 's' : ''} · ${repo}:${branch}`.slice(0, 256),
+      url: body.compare, color: 0x5865f2, description: lines.join('\n'), ...footer,
+    };
+  }
+
+  if (event === 'pull_request') {
+    const pr = body.pull_request || {};
+    const action = body.action;
+    let emoji = '🔀', color = 0x3ba55d, label = action;
+    if (action === 'closed') {
+      if (pr.merged) { emoji = '🟣'; color = 0x8957e5; label = 'merged'; }
+      else { emoji = '🔴'; color = 0xc24036; label = 'closed'; }
+    } else if (action !== 'opened' && action !== 'reopened') return null;
+    return {
+      title: `${emoji} PR ${label}: ${pr.title || ''} · ${repo}`.slice(0, 256),
+      url: pr.html_url, color,
+      fields: [{ name: 'PR', value: `#${pr.number ?? '-'}`, inline: true }], ...footer,
+    };
+  }
+
+  if (event === 'issues') {
+    const action = body.action;
+    if (action !== 'opened' && action !== 'closed' && action !== 'reopened') return null;
+    const is = body.issue || {};
+    return {
+      title: `🐛 Issue ${action}: ${is.title || ''} · ${repo}`.slice(0, 256),
+      url: is.html_url, color: action === 'closed' ? 0x5a6379 : 0xe0a03a, ...footer,
+    };
+  }
+
+  if (event === 'release') {
+    if (body.action !== 'published') return null;
+    const rel = body.release || {};
+    return {
+      title: `🏷️ Release ${rel.tag_name || ''} · ${repo}`.slice(0, 256),
+      url: rel.html_url, color: 0x3ba55d, ...footer,
+    };
+  }
+
+  if (event === 'workflow_run') {
+    const wr = body.workflow_run || {};
+    if (body.action !== 'completed' || wr.conclusion !== 'failure') return null; // only surface failures
+    return {
+      title: `🔴 CI failed: ${wr.name || ''} · ${repo}`.slice(0, 256),
+      url: wr.html_url, color: 0xc24036,
+      fields: [{ name: 'Branch', value: wr.head_branch || '-', inline: true }], ...footer,
+    };
+  }
+
+  return null; // ignore other events
 }

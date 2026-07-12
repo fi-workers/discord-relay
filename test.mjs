@@ -6,6 +6,7 @@ import { handleRequest } from './core.mjs';
 const ENV = {
   DISCORD_SENTRY_WEBHOOK: 'https://discord.test/sentry',
   DISCORD_DEPLOY_WEBHOOK: 'https://discord.test/deploy',
+  DISCORD_GITHUB_WEBHOOK: 'https://discord.test/github',
 };
 
 // Capture the outgoing Discord call by stubbing global fetch.
@@ -88,6 +89,42 @@ test('sentry event -> title + link', () => withFetch(async (calls) => {
     title: 'TypeError: x', level: 'error', environment: 'production', web_url: 'https://sentry.io/i/1' } } });
   assert.match(calls[0].embed.title, /TypeError: x/);
   assert.equal(calls[0].embed.url, 'https://sentry.io/i/1');
+}));
+
+test('github push -> commit list embed', () => withFetch(async (calls) => {
+  await handleRequest(new Request('http://x/api/github', {
+    method: 'POST', headers: { 'x-github-event': 'push' },
+    body: JSON.stringify({ ref: 'refs/heads/main', compare: 'https://gh/compare',
+      repository: { full_name: 'fi/relay' }, sender: { login: 'jh' },
+      commits: [{ id: 'abcdef1234', message: 'feat: x\n\nbody' }] }) }), ENV);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, ENV.DISCORD_GITHUB_WEBHOOK);
+  assert.match(calls[0].embed.title, /1 commit · fi\/relay:main/);
+  assert.match(calls[0].embed.description, /`abcdef1` feat: x/);
+}));
+
+test('github PR merged -> purple embed', () => withFetch(async (calls) => {
+  await handleRequest(new Request('http://x/api/github', {
+    method: 'POST', headers: { 'x-github-event': 'pull_request' },
+    body: JSON.stringify({ action: 'closed', repository: { full_name: 'fi/relay' },
+      pull_request: { title: 'Add X', number: 7, merged: true, html_url: 'https://gh/pr/7' } }) }), ENV);
+  assert.match(calls[0].embed.title, /PR merged: Add X/);
+  assert.equal(calls[0].embed.color, 0x8957e5);
+}));
+
+test('github ping -> 200, no post', () => withFetch(async (calls) => {
+  const r = await handleRequest(new Request('http://x/api/github', {
+    method: 'POST', headers: { 'x-github-event': 'ping' }, body: JSON.stringify({ zen: 'hi' }) }), ENV);
+  assert.equal(r.status, 200);
+  assert.equal(calls.length, 0);
+}));
+
+test('github workflow_run success is filtered', () => withFetch(async (calls) => {
+  await handleRequest(new Request('http://x/api/github', {
+    method: 'POST', headers: { 'x-github-event': 'workflow_run' },
+    body: JSON.stringify({ action: 'completed', repository: { full_name: 'fi/relay' },
+      workflow_run: { name: 'CI', conclusion: 'success' } }) }), ENV);
+  assert.equal(calls.length, 0);
 }));
 
 test('signature required but missing -> 401', () => withFetch(async (calls) => {
