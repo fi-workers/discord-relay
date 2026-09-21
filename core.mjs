@@ -10,7 +10,7 @@
 //   DISCORD_SENTRY_WEBHOOK, DISCORD_DEPLOY_WEBHOOK   (required)
 //   SENTRY_SECRET, VERCEL_SECRET                     (optional; enable HMAC verify)
 
-export async function handleRequest(request, env) {
+export async function handleRequest(request, env, ctx) {
   const url = new URL(request.url);
   if (request.method === 'GET') return new Response('discord-relay: ok', { status: 200 });
   if (request.method !== 'POST') return new Response('method not allowed', { status: 405 });
@@ -26,7 +26,7 @@ export async function handleRequest(request, env) {
           request.headers.get('sentry-hook-signature'))))
         return new Response('bad signature', { status: 401 });
       const embed = sentryToEmbed(JSON.parse(raw));
-      if (embed) await sendToDiscord(env, 'sentry', embed);
+      if (embed) await dispatch(ctx, env, 'sentry', embed);
       return new Response('ok');
     }
 
@@ -35,7 +35,7 @@ export async function handleRequest(request, env) {
           request.headers.get('x-vercel-signature'))))
         return new Response('bad signature', { status: 401 });
       const embed = vercelToEmbed(JSON.parse(raw));
-      if (embed) await sendToDiscord(env, 'deploy', embed);
+      if (embed) await dispatch(ctx, env, 'deploy', embed);
       return new Response('ok');
     }
 
@@ -45,7 +45,7 @@ export async function handleRequest(request, env) {
         return new Response('bad signature', { status: 401 });
       const event = request.headers.get('x-github-event') || '';
       const embed = githubToEmbed(event, JSON.parse(raw));
-      if (embed) await sendToDiscord(env, 'github', embed);
+      if (embed) await dispatch(ctx, env, 'github', embed);
       return new Response('ok');
     }
 
@@ -84,6 +84,29 @@ const DEST = {
 //   Bot mode     (DISCORD_BOT_TOKEN set): REST call to the channel — stateless
 //                HTTP, no Gateway/session needed, fine on serverless.
 //   Webhook mode (default): POST straight to the channel webhook URL.
+// Hand the delivery off, and answer the sender now.
+//
+// Why: Sentry gives a webhook only a few seconds and never retries. post() sleeps
+// up to 5s to honor a Discord 429, so waiting on delivery can burn that whole
+// budget — 7 of 56 issue.created hooks were recorded as resp=0, while every
+// filtered action (which never calls Discord) answered 200.
+//
+// Without a `ctx` (the Node adapter, tests) there is nothing to hand off to, so we
+// keep awaiting: a misconfigured destination should still surface as a 500 there.
+function dispatch(ctx, env, kind, embed) {
+  if (typeof ctx?.waitUntil !== 'function') {
+    return sendToDiscord(env, kind, embed);
+  }
+  // Backgrounded, so the status code can no longer carry the failure. Log it —
+  // and swallow it, because an unhandled rejection tears down some runtimes.
+  ctx.waitUntil(
+    sendToDiscord(env, kind, embed).catch((e) => {
+      console.error(`[discord-relay] ${kind} delivery failed:`, e?.message ?? e);
+    }),
+  );
+  return Promise.resolve();
+}
+
 async function sendToDiscord(env, kind, embed) {
   const keys = DEST[kind];
   const body = JSON.stringify({ embeds: [embed] });
