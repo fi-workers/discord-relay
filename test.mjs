@@ -161,3 +161,66 @@ test('tampered body with signature -> 401', () => withFetch(async (calls) => {
   assert.equal(r.status, 401);
   assert.equal(calls.length, 0);
 }));
+
+// ── Ack before delivery ──
+// Sentry gives a webhook a few seconds and does not retry. post() sleeps up to 5s
+// to honor a Discord 429, so waiting on delivery burns that budget: 7 of 56
+// issue.created deliveries were recorded as resp=0 (no response), while every
+// filtered action — which never calls Discord — returned 200.
+
+// A fetch stub whose completion we control, so we can look at the moment
+// between "responded" and "delivered".
+function withSlowFetch(fn) {
+  const calls = [];
+  const state = { delivered: false };
+  const orig = globalThis.fetch;
+  globalThis.fetch = async (url, opts) => {
+    calls.push({ url, embed: JSON.parse(opts.body).embeds[0] });
+    await new Promise((r) => setTimeout(r, 50));
+    state.delivered = true;
+    return new Response('ok', { status: 200 });
+  };
+  return fn(calls, state).finally(() => { globalThis.fetch = orig; });
+}
+
+const sentryIssue = { action: 'created', data: { event: {
+  title: 'TypeError: x', level: 'error', web_url: 'https://sentry.io/i/1' } } };
+
+test('with waitUntil, the ack does not wait on Discord', () => withSlowFetch(async (calls, state) => {
+  const pending = [];
+  const ctx = { waitUntil: (p) => pending.push(p) };
+
+  const r = await handleRequest(new Request('http://x/api/sentry', {
+    method: 'POST', body: JSON.stringify(sentryIssue) }), ENV, ctx);
+
+  assert.equal(r.status, 200);
+  assert.equal(state.delivered, false, 'responded before Discord finished');
+
+  await Promise.all(pending);
+  assert.equal(state.delivered, true, 'delivery still completes in the background');
+  assert.equal(calls.length, 1);
+}));
+
+test('background delivery failure does not reject the waitUntil promise', () => {
+  const orig = globalThis.fetch;
+  globalThis.fetch = async () => new Response('nope', { status: 500 });
+  const pending = [];
+  const ctx = { waitUntil: (p) => pending.push(p) };
+  return handleRequest(new Request('http://x/api/sentry', {
+    method: 'POST', body: JSON.stringify(sentryIssue) }), ENV, ctx)
+    .then(async (r) => {
+      assert.equal(r.status, 200);
+      // An unhandled rejection would tear down the isolate on some runtimes.
+      await Promise.all(pending);
+    })
+    .finally(() => { globalThis.fetch = orig; });
+});
+
+test('without waitUntil, delivery still awaits so failures surface', () => {
+  const orig = globalThis.fetch;
+  globalThis.fetch = async () => new Response('nope', { status: 500 });
+  return handleRequest(new Request('http://x/api/sentry', {
+    method: 'POST', body: JSON.stringify(sentryIssue) }), ENV)
+    .then((r) => assert.equal(r.status, 500))
+    .finally(() => { globalThis.fetch = orig; });
+});

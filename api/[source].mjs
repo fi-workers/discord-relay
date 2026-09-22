@@ -4,4 +4,5 @@ import { handleRequest } from '../core.mjs';
 
 export const config = { runtime: 'edge' };
 
-export default (request) => handleRequest(request, process.env);
+// Vercel passes a RequestContext with waitUntil — that is what lets us ack first.
+export default (request, context) => handleRequest(request, process.env, context);
